@@ -1,15 +1,9 @@
-from typing import Optional
+from typing import Optional, Union
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.concurrency import asynccontextmanager
 from pydantic import BaseModel
-from haystack import Pipeline
-from haystack_integrations.components.generators.ollama import OllamaGenerator
-from haystack.components.embedders import SentenceTransformersTextEmbedder
 import os
 import shutil
-from haystack.components.builders import ChatPromptBuilder
-from haystack.dataclasses import ChatMessage
-from haystack.components.retrievers.in_memory import InMemoryEmbeddingRetriever
 import uvicorn
 from haystack.dataclasses import ByteStream
 from haystack_integrations.components.retrievers.qdrant import QdrantEmbeddingRetriever
@@ -23,12 +17,27 @@ from pipeline.query_pipeline.prompt_query import QueryPipelineWrapper
 UPLOAD_DIR = "uploaded_files"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+store_user = QdrantDocumentStore(
+    path="qdrant_user_vectordb",
+    index="Document", 
+    embedding_dim=384, 
+    use_sparse_embeddings=True
+)
+
+# 2. Database chứa dữ liệu gốc của hệ thống
+store_initial = QdrantDocumentStore(
+    path="qdrant_initial_vectordb",
+    index="Document", 
+    embedding_dim=384, 
+    use_sparse_embeddings=True
+)
+
 #------ Process user-uploaded file ------
 upload_data_indexer = IndexingPipelineWrapper()
-upload_data_indexer.setup(index_name="user_uploaded_data")
+upload_data_indexer.setup(document_store=store_user)
 
 query_engine = QueryPipelineWrapper()
-query_engine.setup()
+query_engine.setup(init_document_stores=store_initial, user_document_store=store_user)
 
 def process_file_to_memory(file_path: str, filename: str):
     """Hàm phụ trợ để biến 1 file thành ByteStream và đưa vào pipeline"""
@@ -50,7 +59,7 @@ def process_file_to_memory(file_path: str, filename: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Quét thư mục và nạp dữ liệu có sẵn khi vừa bật server
-    print("Đang nạp dữ liệu cũ vào RAM...")
+    print("Đang nạp dữ liệu cũ ...")
     for filename in os.listdir(UPLOAD_DIR):
         file_path = os.path.join(UPLOAD_DIR, filename)
         process_file_to_memory(file_path, filename)
@@ -59,21 +68,21 @@ async def lifespan(app: FastAPI):
 
 
 
-class QueryRequest(BaseModel):
-    question: str
+# class QueryRequest(BaseModel):
+#     question: str
 
 app = FastAPI(lifespan=lifespan)
 
 @app.post("/api/chat")
 async def chat_and_upload(
     question: str = Form(...),
-    file: Optional[UploadFile] = File(None)
+    file: Union[UploadFile, str, None] = File(None) # <--- Chấp nhận cả string rỗng do Swagger gửi
 ):
     try:
         uploaded_filename = None
         
-        # 1. Check file
-        if file and file.filename:
+        # 1. Check file (Đảm bảo nó là UploadFile xịn chứ không phải chuỗi rỗng)
+        if file and isinstance(file, UploadFile) and file.filename:
             file_path = os.path.join(UPLOAD_DIR, file.filename)
             
             with open(file_path, "wb") as buffer:
@@ -82,22 +91,14 @@ async def chat_and_upload(
             process_file_to_memory(file_path, file.filename)
             uploaded_filename = file.filename
 
-        # 2. Question answering
-        result = query_engine.pipeline.run(
-            {
-                "text_embedder": {"text": question},
-                "prompt_builder": {"question": question}
-            }
-        )
+        # 2. Xử lý câu hỏi (gọi AI)
+        response_data = query_engine.ask(question)
         
-        answer = result["llm"]["replies"][0]
-        
-        # 3. Return response
         return {
             "question": question,
-            "answer": answer,
-            "attached_file": uploaded_filename,
-            "status": "success"
+            "answer": response_data["answer"],
+            "sources": response_data["sources"],
+            "attached_file": uploaded_filename # Có thể thêm dòng này để biết file có được nạp không
         }
         
     except Exception as e:
@@ -151,5 +152,5 @@ async def chat_and_upload(
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
 
-# if __name__ == "__main__":
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
