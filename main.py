@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from typing import Optional
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.concurrency import asynccontextmanager
 from pydantic import BaseModel
 from haystack import Pipeline
@@ -14,6 +15,7 @@ from haystack.dataclasses import ByteStream
 from haystack_integrations.components.retrievers.qdrant import QdrantEmbeddingRetriever
 from pipeline.indexing_pipeline.Qdrant_indexing import IndexingPipelineWrapper
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
+from pipeline.query_pipeline.prompt_query import QueryPipelineWrapper
 
 
 #------ Thiết lập thư mục lưu trữ file upload -----
@@ -24,6 +26,9 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 #------ Process user-uploaded file ------
 upload_data_indexer = IndexingPipelineWrapper()
 upload_data_indexer.setup(index_name="user_uploaded_data")
+
+query_engine = QueryPipelineWrapper()
+query_engine.setup()
 
 def process_file_to_memory(file_path: str, filename: str):
     """Hàm phụ trợ để biến 1 file thành ByteStream và đưa vào pipeline"""
@@ -52,114 +57,99 @@ async def lifespan(app: FastAPI):
     print("Hoàn tất khởi động!")
     yield
 
+
+
 class QueryRequest(BaseModel):
     question: str
 
 app = FastAPI(lifespan=lifespan)
 
-#------ Thiết lập pipeline truy vấn ------
-
-
-text_embedder = SentenceTransformersTextEmbedder(model="sentence-transformers/all-MiniLM-L6-v2")
-
-template = [
-    ChatMessage.from_user(
-        """You are an expert assistant. Your task is to answer the question based ONLY on the provided documents.
-        
-        CRITICAL INSTRUCTIONS:
-        1. You MUST cite the source of your information.
-        2. Use the format [file name] at the end of the sentence or paragraph where you use that information from file.
-        3. If the answer is not contained in the provided documents, politely say "I do not have enough information to answer this question" and DO NOT guess.
-
-        Here is the relevant information from User Uploads:
-        {% for info in user_info %}
-            Source: [{{ info.meta.file_name }}]
-            Content: {{ info.content }}
-            ---
-        {% endfor %}
-
-        Here is the relevant information from Internal Documents:
-        {% for info in internal_info %}
-            Source: [{{ info.meta.file_name }}]
-            Content: {{ info.content }}
-            ---
-        {% endfor %}
-
-        Question: {{question}}
-        """
-    )
-]
-
-prompt_builder = ChatPromptBuilder(template=template, required_variables=["question", "user_info", "internal_info"])
-# Haystack Pipeline
-generator = OllamaGenerator(
-    model="qwen2.5:1.5b",
-    url="http://localhost:11434"
-)
-
-retriever_upload_data = QdrantEmbeddingRetriever(document_store=QdrantDocumentStore(path="qdrant_vectordb", index="user_uploaded_data", embedding_dim=384))
-retriever_initial_data = QdrantEmbeddingRetriever(document_store=QdrantDocumentStore(path="qdrant_vectordb", index="initial_data", embedding_dim=384))
-
-query_pipeline = Pipeline()
-query_pipeline.add_component("text_embedder", text_embedder)
-query_pipeline.add_component("retriever_upload_data", retriever_upload_data)
-query_pipeline.add_component("retriever_initial_data", retriever_initial_data)
-query_pipeline.add_component("prompt_builder", prompt_builder)
-query_pipeline.add_component("llm", generator)
-
-query_pipeline.connect("text_embedder.embedding", "retriever_upload_data.query_embedding")
-query_pipeline.connect("retriever_upload_data.documents", "prompt_builder.user_info")
-query_pipeline.connect("text_embedder.embedding", "retriever_initial_data.query_embedding")
-query_pipeline.connect("retriever_initial_data.documents", "prompt_builder.internal_info")
-query_pipeline.connect("prompt_builder.prompt", "llm.prompt")
-
-
-
-# Định nghĩa Endpoint (API Route)
-@app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+@app.post("/api/chat")
+async def chat_and_upload(
+    question: str = Form(...),
+    file: Optional[UploadFile] = File(None)
+):
     try:
-        # 1. Lấy tên file và tạo đường dẫn lưu trữ
-        file_path = os.path.join(UPLOAD_DIR, file.filename)
+        uploaded_filename = None
         
-        # 2. Lưu dữ liệu từ request vào ổ cứng
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # 1. Check file
+        if file and file.filename:
+            file_path = os.path.join(UPLOAD_DIR, file.filename)
             
-        # 3. Xử lý file và đưa vào pipeline
-        process_file_to_memory(file_path, file.filename)
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+                
+            process_file_to_memory(file_path, file.filename)
+            uploaded_filename = file.filename
 
-        return {
-            "status": "success",
-            "message": "Đã lưu file thành công vào hệ thống!",
-            "filename": file.filename,
-            "saved_path": file_path
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Có lỗi xảy ra khi lưu file: {str(e)}")
-
-@app.post("/api/ask")
-async def ask_question(request: QueryRequest):
-    try:
-        # Đưa câu hỏi của user vào pipeline
-        result = query_pipeline.run(
+        # 2. Question answering
+        result = query_engine.pipeline.run(
             {
-                "text_embedder": {"text": request.question},
-                "prompt_builder": {"question": request.question}
+                "text_embedder": {"text": question},
+                "prompt_builder": {"question": question}
             }
         )
         
-        # Trích xuất câu trả lời
         answer = result["llm"]["replies"][0]
         
+        # 3. Return response
         return {
-            "question": request.question,
-            "answer": answer
+            "question": question,
+            "answer": answer,
+            "attached_file": uploaded_filename,
+            "status": "success"
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+
+
+# @app.post("/api/upload")
+# async def upload_file(file: UploadFile = File(...)):
+#     try:
+#         # 1. Lấy tên file và tạo đường dẫn lưu trữ
+#         file_path = os.path.join(UPLOAD_DIR, file.filename)
+        
+#         # 2. Lưu dữ liệu từ request vào ổ cứng
+#         with open(file_path, "wb") as buffer:
+#             shutil.copyfileobj(file.file, buffer)
+            
+#         # 3. Xử lý file và đưa vào pipeline
+#         process_file_to_memory(file_path, file.filename)
+
+#         return {
+#             "status": "success",
+#             "message": "Đã lưu file thành công vào hệ thống!",
+#             "filename": file.filename,
+#             "saved_path": file_path
+#         }
+        
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Có lỗi xảy ra khi lưu file: {str(e)}")
+
+# @app.post("/api/ask")
+# async def ask_question(request: QueryRequest):
+#     try:
+#         # Đưa câu hỏi của user vào pipeline
+#         result = query_engine.pipeline.run(
+#             {
+#                 "text_embedder": {"text": request.question},
+#                 "prompt_builder": {"question": request.question}
+#             }
+#         )
+        
+#         # Trích xuất câu trả lời
+#         answer = result["llm"]["replies"][0]
+        
+#         return {
+#             "question": request.question,
+#             "answer": answer
+#         }
+        
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# if __name__ == "__main__":
+#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

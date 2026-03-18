@@ -22,14 +22,14 @@ class QueryPipelineWrapper(BasePipelineWrapper):
                 2. Use the format [file name] at the end of the sentence or paragraph where you use that information from file.
                 3. If the answer is not contained in the provided documents, politely say "I do not have enough information to answer this question" and DO NOT guess.
 
-                Here is the relevant information from User Uploads:
+                Here are the relevant informations from User Uploads:
                 {% for info in user_info %}
                     Source: [{{ info.meta.file_name }}]
                     Content: {{ info.content }}
                     ---
                 {% endfor %}
 
-                Here is the relevant information from Internal Documents:
+                Here are the relevant informations from Internal Documents:
                 {% for info in internal_info %}
                     Source: [{{ info.meta.file_name }}]
                     Content: {{ info.content }}
