@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi.concurrency import asynccontextmanager
 from pydantic import BaseModel
 from haystack import Pipeline
 from haystack_integrations.components.generators.ollama import OllamaGenerator
@@ -8,21 +9,48 @@ from haystack.components.embedders import SentenceTransformersDocumentEmbedder
 from haystack.components.embedders import SentenceTransformersTextEmbedder
 import os
 import shutil
-import pandas as pd
 from haystack.components.builders import ChatPromptBuilder
 from haystack.dataclasses import ChatMessage
 from haystack.components.retrievers.in_memory import InMemoryEmbeddingRetriever
 import uvicorn
 from haystack.dataclasses import ByteStream
-from haystack.components.converters import PyPDFToDocument, TextFileToDocument
-from haystack.components.preprocessors import DocumentSplitter
 from haystack_integrations.components.retrievers.qdrant import QdrantEmbeddingRetriever
+from vectorDB_pipeline.indexing_pipeline.InMemoryDocument_indexing import IndexingPipelineWrapper
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
+
 
 class QueryRequest(BaseModel):
     question: str
 
-app = FastAPI()
+#------ Process user-uploaded file ------
+def process_file_to_memory(file_path: str, filename: str):
+    """Hàm phụ trợ để biến 1 file thành ByteStream và đưa vào pipeline"""
+    with open(file_path, "rb") as f:
+        content = f.read()
+    
+    mime_type = "application/pdf" if filename.endswith(".pdf") else "text/plain"
+    
+    stream = ByteStream(
+        data=content,
+        mime_type=mime_type,
+        meta={
+            "file_name": filename,
+            "source_type": "user_upload",
+        }
+    )
+    upload_data_indexer.pipeline.run({"router": {"sources": [stream]}})
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Quét thư mục và nạp dữ liệu có sẵn khi vừa bật server
+    print("Đang nạp dữ liệu cũ vào RAM...")
+    for filename in os.listdir(UPLOAD_DIR):
+        file_path = os.path.join(UPLOAD_DIR, filename)
+        process_file_to_memory(file_path, filename)
+    print("Hoàn tất khởi động!")
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 #------ Tạo thư mục lưu trữ dữ liệu nếu chưa tồn tại ------
 UPLOAD_DIR = "uploaded_files"
@@ -30,7 +58,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 #------ Thiết lập Document Store và Query Pipeline ------
-document_store = InMemoryDocumentStore()
+# document_store = InMemoryDocumentStore()
 
 upload_file = []
     
@@ -52,63 +80,49 @@ for filename in os.listdir(UPLOAD_DIR):
         }
     )
     upload_file.append(stream)
+    
 
-# Converter
-pdf_converter = PyPDFToDocument()
-txt_converter = TextFileToDocument()
-
-upload_data = [] 
-
-for stream in upload_file:
-    if stream.mime_type == "application/pdf":
-        extracted_docs = pdf_converter.run(sources=[stream])["documents"]
-        upload_data.extend(extracted_docs)
-        
-    elif stream.mime_type == "text/plain":
-        extracted_docs = txt_converter.run(sources=[stream])["documents"]
-        upload_data.extend(extracted_docs)
-
-# Splitter
-splitter = DocumentSplitter(split_by="word", split_length=300, split_overlap=50)
-split_docs = splitter.run(documents=upload_data)["documents"]
-
-# Embedding and store in InMemoryDocumentStore
-document_embeddings = SentenceTransformersDocumentEmbedder(model="sentence-transformers/all-MiniLM-L6-v2")
-
-document_with_embeddings = document_embeddings.run(split_docs)
-document_store.write_documents(document_with_embeddings["documents"])
-
-
+upload_data_indexer = IndexingPipelineWrapper()
+upload_data_indexer.setup()
+upload_data_indexer.pipeline.run({"router": {"sources": upload_file}})
 
 text_embedder = SentenceTransformersTextEmbedder(model="sentence-transformers/all-MiniLM-L6-v2")
 
-retriever_upload_data = InMemoryEmbeddingRetriever(document_store)
+retriever_upload_data = InMemoryEmbeddingRetriever(upload_data_indexer.document_store)
 retriever_initial_data = QdrantEmbeddingRetriever(document_store=QdrantDocumentStore(path="qdrant_data",embedding_dim=384,))
 
 template = [
     ChatMessage.from_user(
-        """You are an exeprt in answering questions about content in internal documents.
+        """You are an expert assistant. Your task is to answer the question based ONLY on the provided documents.
+        
+        CRITICAL INSTRUCTIONS:
+        1. You MUST cite the source of your information.
+        2. Use the format [file name] at the end of the sentence or paragraph where you use that information from file.
+        3. If the answer is not contained in the provided documents, politely say "I do not have enough information to answer this question" and DO NOT guess.
 
-        Here are some relevant information from users:
+        Here is the relevant information from User Uploads:
         {% for info in user_info %}
-            {{ info.content }}
+            Source: [{{ info.meta.file_name }}]
+            Content: {{ info.content }}
+            ---
         {% endfor %}
 
-        And here is some relevant information from internal documents:
+        Here is the relevant information from Internal Documents:
         {% for info in internal_info %}
-            {{ info.content }}
+            Source: [{{ info.meta.file_name }}]
+            Content: {{ info.content }}
+            ---
         {% endfor %}
 
-        Here is the question to answer: {{question}}
+        Question: {{question}}
         """
     )
 ]
 
-prompt_builder = ChatPromptBuilder(template=template)
-
+prompt_builder = ChatPromptBuilder(template=template, required_variables=["question", "user_info", "internal_info"])
 # Haystack Pipeline
 generator = OllamaGenerator(
-    model="qwen2.5:1.5b", 
+    model="qwen2.5:1.5b",
     url="http://localhost:11434"
 )
 
@@ -125,6 +139,8 @@ query_pipeline.connect("text_embedder.embedding", "retriever_initial_data.query_
 query_pipeline.connect("retriever_initial_data.documents", "prompt_builder.internal_info")
 query_pipeline.connect("prompt_builder.prompt", "llm.prompt")
 
+
+
 # Định nghĩa Endpoint (API Route)
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -132,10 +148,13 @@ async def upload_file(file: UploadFile = File(...)):
         # 1. Lấy tên file và tạo đường dẫn lưu trữ
         file_path = os.path.join(UPLOAD_DIR, file.filename)
         
-        # 2. Mở file ở chế độ ghi nhị phân (wb) và copy dữ liệu từ request vào ổ cứng
+        # 2. Lưu dữ liệu từ request vào ổ cứng
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
+        # 3. Xử lý file và đưa vào pipeline
+        process_file_to_memory(file_path, file.filename)
+
         return {
             "status": "success",
             "message": "Đã lưu file thành công vào hệ thống!",
