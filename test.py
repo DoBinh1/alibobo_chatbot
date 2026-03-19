@@ -2,8 +2,10 @@ from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 # 1. Kết nối tới thư mục dữ liệu bạn vừa tạo
 document_store = QdrantDocumentStore(
-    path="qdrant_data", # Đảm bảo tên này trùng với tên thư mục bạn đã tạo
-    embedding_dim=384,
+    path="qdrant_initial_vectordb",
+    index="Document", 
+    embedding_dim=384, 
+    use_sparse_embeddings=True
 )
 
 # 2. Lấy tất cả tài liệu trong database ra

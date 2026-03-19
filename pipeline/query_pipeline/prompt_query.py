@@ -96,7 +96,7 @@ class QueryPipelineWrapper(BasePipelineWrapper):
             sources.append({
                 "file_name": doc.meta.get("file_name", "Tài liệu không xác định"),
                 "source_type": doc.meta.get("source_type", "unknown"),
-                "content_snippet": doc.content + "..." # Trích 250 ký tự đầu tiên
+                "content_snippet": doc.content + "..."
             })
             
         return {

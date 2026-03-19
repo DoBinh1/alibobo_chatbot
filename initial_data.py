@@ -1,23 +1,31 @@
 import os
 from haystack.dataclasses import ByteStream
-from indexing import IndexingPipelineWrapper
+from pipeline.indexing_pipeline.Qdrant_indexing import IndexingPipelineWrapper
+from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 
 def seed_initial_data():
     print("Bắt đầu nạp dữ liệu ngữ cảnh ban đầu vào Qdrant...")
     
-    # Khởi tạo pipeline của bạn
+    store_initial = QdrantDocumentStore(
+    path="qdrant_initial_vectordb",
+    index="Document", 
+    embedding_dim=384, 
+    use_sparse_embeddings=True
+)
+
+    # Khởi tạo pipeline
     indexer = IndexingPipelineWrapper()
-    indexer.setup(index="initial_data")
+    indexer.setup(store_initial)
     
-    # Giả sử bạn để các file bài báo, file CSV ở thư mục này
+    # Quét thư mục dữ liêu ban đầu
     data_dir = "./initial_data" 
     sources = []
     
     for filename in os.listdir(data_dir):
         file_path = os.path.join(data_dir, filename)
         
-        # Đọc file thành ByteStream và GẮN NHÃN "system_init"
+        # Đọc file thành ByteStream và gắn nhãn "system_init"
         with open(file_path, "rb") as f:
             content = f.read()
             

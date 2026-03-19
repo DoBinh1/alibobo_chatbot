@@ -1,15 +1,14 @@
-from typing import Optional, Union
+from typing import Optional
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.concurrency import asynccontextmanager
-from pydantic import BaseModel
 import os
 import shutil
 import uvicorn
 from haystack.dataclasses import ByteStream
-from haystack_integrations.components.retrievers.qdrant import QdrantEmbeddingRetriever
 from pipeline.indexing_pipeline.Qdrant_indexing import IndexingPipelineWrapper
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from pipeline.query_pipeline.prompt_query import QueryPipelineWrapper
+
 
 
 #------ Thiết lập thư mục lưu trữ file upload -----
@@ -68,21 +67,19 @@ async def lifespan(app: FastAPI):
 
 
 
-# class QueryRequest(BaseModel):
-#     question: str
 
 app = FastAPI(lifespan=lifespan)
 
 @app.post("/api/chat")
 async def chat_and_upload(
     question: str = Form(...),
-    file: Union[UploadFile, str, None] = File(None) # <--- Chấp nhận cả string rỗng do Swagger gửi
+    file: Optional[UploadFile] = File(None) 
 ):
     try:
         uploaded_filename = None
         
-        # 1. Check file (Đảm bảo nó là UploadFile xịn chứ không phải chuỗi rỗng)
-        if file and isinstance(file, UploadFile) and file.filename:
+        # 1. Check file
+        if file is not None and getattr(file, "filename", "") != "":
             file_path = os.path.join(UPLOAD_DIR, file.filename)
             
             with open(file_path, "wb") as buffer:
@@ -91,18 +88,50 @@ async def chat_and_upload(
             process_file_to_memory(file_path, file.filename)
             uploaded_filename = file.filename
 
-        # 2. Xử lý câu hỏi (gọi AI)
+        # 2. LLM response 
         response_data = query_engine.ask(question)
         
         return {
             "question": question,
             "answer": response_data["answer"],
             "sources": response_data["sources"],
-            "attached_file": uploaded_filename # Có thể thêm dòng này để biết file có được nạp không
+            "attached_file": uploaded_filename
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# @app.post("/api/chat")
+# async def chat_and_upload(
+#     request: QueryRequest,
+# ):
+#     try:
+#         uploaded_filename = None
+        
+#         # 1. Check file (Đảm bảo nó là UploadFile xịn chứ không phải chuỗi rỗng)
+#         if file and isinstance(file, UploadFile) and file.filename:
+#             file_path = os.path.join(UPLOAD_DIR, file.filename)
+            
+#             with open(file_path, "wb") as buffer:
+#                 shutil.copyfileobj(file.file, buffer)
+                
+#             process_file_to_memory(file_path, file.filename)
+#             uploaded_filename = file.filename
+
+#         # 2. Xử lý câu hỏi (gọi AI)
+#         response_data = query_engine.ask(question)
+        
+#         return {
+#             "question": question,
+#             "answer": response_data["answer"],
+#             "sources": response_data["sources"],
+#             "attached_file": uploaded_filename
+#         }
+        
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
 
 

@@ -14,7 +14,6 @@ from haystack_integrations.components.embedders.fastembed import FastembedSparse
 
 
 
-
 class IndexingPipelineWrapper(BasePipelineWrapper):
     def setup(self,document_store) -> None:
         indexing = Pipeline()
@@ -26,7 +25,7 @@ class IndexingPipelineWrapper(BasePipelineWrapper):
         indexing.add_component("sparse_embedder", FastembedSparseDocumentEmbedder(model="Qdrant/bm42-all-minilm-l6-v2-attentions"))
         indexing.add_component("dense_embedder", SentenceTransformersDocumentEmbedder(model="sentence-transformers/all-MiniLM-L6-v2"))
         indexing.add_component("writer", DocumentWriter(document_store=document_store, policy="overwrite"))
-        
+
         indexing.connect("router.application/pdf", "pdf_converter.sources")
         indexing.connect("router.text/plain", "txt_converter.sources")
         indexing.connect("pdf_converter", "joiner")
@@ -34,6 +33,7 @@ class IndexingPipelineWrapper(BasePipelineWrapper):
         indexing.connect("joiner", "splitter")
         indexing.connect("splitter", "sparse_embedder")
         indexing.connect("splitter", "dense_embedder")
+        indexing.connect("sparse_embedder", "writer")
         indexing.connect("dense_embedder", "writer")
 
         self.pipeline = indexing
